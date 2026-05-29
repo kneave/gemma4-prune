@@ -1,0 +1,16 @@
+# Downloaded model weights
+bf16/
+
+# Generated model outputs
+pruned-48/
+pruned-56/
+pruned-64/
+
+# Calibration data
+calibration/
+
+# LoRA training output
+lora-healed/
+
+# Evaluation results
+lang_test_results.json
