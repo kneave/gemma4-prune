@@ -7,11 +7,54 @@ Based on: [esokullu/gemma4-turkish-26b-a4b-pruned](https://huggingface.co/esokul
 
 ## Keegan's Note
 
-The idea behind this was to throw a load of sample data at an instrumented model to see which experts activated, after which we could see which were active or not and prune them and see how useful the model was afterwards. 
+# Update: Apparently what I was trying is called "merging" and it has been superceded by "reaping", more info at the paper referenced below.
 
-It turns out ripping out all but 48 experts wasn't actually terrible, it was vaguely coherant but ask it the capital of France or to tell a joke and it quickly went of the rails. Ask it about potatoes, seriously.
+The idea behind this was to throw a load of sample data at an instrumented model to see which experts activated, after which we could see which were active or not and >
 
-It was looking promising though running the heal script on CPU would've taken over a year which isn't great really. If anyone manages to get this working please let me know!
+It turns out ripping out all but 48 experts wasn't actually terrible, it was vaguely coherant but ask it the capital of France or to tell a joke and it quickly went of>
+
+It was looking promising though running the heal script on CPU would've taken over a year which isn't great really. If anyone manages to get this working please let me>
+
+
+## Academic Reference: REAP (Router-weighted Expert Activation Pruning)
+
+**Lasby et al. (2026), ICLR 2026 — [arXiv:2510.13999](https://arxiv.org/abs/2510.13999)**
+
+Full analysis filed in `~/KITT/docs/research/` and MemPalace (`paper-analysis → reap-moe-compression`).
+
+### Why This Matters for This Pipeline
+
+The current pipeline uses **Expert Activation Norm (EAN)** as its pruning criterion (step 2, `01_calibrate.py` logs activation norms, `02_prune_experts.py` selects by norm). REAP proposes a better criterion:
+
+**`Sj = mean_{x where j active} gj(x) · ||fj(x)||₂`**
+
+- **Conditional mean over active tokens only** — not global frequency. Decouples impact from how often an expert fires, protecting rare specialist experts that are critical when they activate.
+- **Gate-weighted** — multiplies activation norm by the router's gate value, capturing how much the router *relies* on that expert per-token. Experts with high norm but low gate contribution get lower scores.
+- **Directly minimizes the reconstruction error bound** — the paper proves this minimizes `Σ gj · ||fj||` which bounds the substitution error from removing expert j.
+
+### Key Findings Relevant Here
+
+| Finding | Implication |
+|---------|-------------|
+| REAP outperforms EAN at 50% compression | The current pipeline should switch its saliency criterion |
+| Merging is catastrophically bad for generative tasks | Confirms pruning (not merging) is the right approach |
+| MC benchmarks are misleading — must evaluate on generation | Perplexity/MC accuracy can hide catastrophic quality loss |
+| **Calibration data must match target domain** | C4 calibration destroys coding ability; use agent/tool-calling data for a harness model |
+| Near-lossless at 50% on Qwen3-Coder-480B, Kimi-K2 | 48/128 expert configs should work well with the right criterion |
+| REAP + 4-bit quantization = 87.5% size reduction, near-lossless | The pipeline should combine pruning + quantization |
+
+### What to Change in This Pipeline
+
+1. **Calibration script (`01_calibrate.py`)**: Also log router gate values `gj(x)` per expert per token. Currently only logs activation norms.
+2. **Pruning script (`02_prune_experts.py`)**: Switch from EAN to REAP scoring — multiply conditional-mean activation norm by conditional-mean gate value.
+3. **Evaluation (`05_evaluate.py`)**: Add generative benchmarks (code generation, reasoning), not just perplexity. MC benchmarks can report false quality.
+4. **Calibration data**: Use domain-matched data. For an English-focused harness model, use English + coding + tool-calling data, not C4.
+
+### Also Relevant
+
+- The "broken" E48 and E64 results in this pipeline's history may partly be due to EAN bias toward frequently-activated experts, over-pruning rare but important specialists. REAP's conditional-mean approach could preserve those.
+- The router's `per_expert_scale` and `softmax` need recalibration after pruning — the paper confirms this is essential (router must renormalize over surviving experts).
+
 
 ## Setup
 
@@ -121,6 +164,41 @@ python /home/kitt/gemma4-prune/05_evaluate.py \
 
 **Strategy**: You have ~95 GB free. Delete intermediate files between steps.
 
-## Monitoring
+## Academic Reference: REAP (Router-weighted Expert Activation Pruning)
 
-Cron job checks tmux session every 30 minutes and reports progress in Discord.
+**Lasby et al. (2026), ICLR 2026 — [arXiv:2510.13999](https://arxiv.org/abs/2510.13999)**
+
+Full analysis filed in `~/KITT/docs/research/` and MemPalace (`paper-analysis → reap-moe-compression`).
+
+### Why This Matters for This Pipeline
+
+The current pipeline uses **Expert Activation Norm (EAN)** as its pruning criterion (step 2, `01_calibrate.py` logs activation norms, `02_prune_experts.py` selects by norm). REAP proposes a better criterion:
+
+**`Sj = mean_{x where j active} gj(x) · ||fj(x)||₂`**
+
+- **Conditional mean over active tokens only** — not global frequency. Decouples impact from how often an expert fires, protecting rare specialist experts that are critical when they activate.
+- **Gate-weighted** — multiplies activation norm by the router's gate value, capturing how much the router *relies* on that expert per-token. Experts with high norm but low gate contribution get lower scores.
+- **Directly minimizes the reconstruction error bound** — the paper proves this minimizes `Σ gj · ||fj||` which bounds the substitution error from removing expert j.
+
+### Key Findings Relevant Here
+
+| Finding | Implication |
+|---------|-------------|
+| REAP outperforms EAN at 50% compression | The current pipeline should switch its saliency criterion |
+| Merging is catastrophically bad for generative tasks | Confirms pruning (not merging) is the right approach |
+| MC benchmarks are misleading — must evaluate on generation | Perplexity/MC accuracy can hide catastrophic quality loss |
+| **Calibration data must match target domain** | C4 calibration destroys coding ability; use agent/tool-calling data for a harness model |
+| Near-lossless at 50% on Qwen3-Coder-480B, Kimi-K2 | 48/128 expert configs should work well with the right criterion |
+| REAP + 4-bit quantization = 87.5% size reduction, near-lossless | The pipeline should combine pruning + quantization |
+
+### What to Change in This Pipeline
+
+1. **Calibration script (`01_calibrate.py`)**: Also log router gate values `gj(x)` per expert per token. Currently only logs activation norms.
+2. **Pruning script (`02_prune_experts.py`)**: Switch from EAN to REAP scoring — multiply conditional-mean activation norm by conditional-mean gate value.
+3. **Evaluation (`05_evaluate.py`)**: Add generative benchmarks (code generation, reasoning), not just perplexity. MC benchmarks can report false quality.
+4. **Calibration data**: Use domain-matched data. For an English-focused harness model, use English + coding + tool-calling data, not C4.
+
+### Also Relevant
+
+- The "broken" E48 and E64 results in this pipeline's history may partly be due to EAN bias toward frequently-activated experts, over-pruning rare but important specialists. REAP's conditional-mean approach could preserve those.
+- The router's `per_expert_scale` and `softmax` need recalibration after pruning — the paper confirms this is essential (router must renormalize over surviving experts).
